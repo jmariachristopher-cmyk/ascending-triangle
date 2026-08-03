@@ -26,7 +26,7 @@ from pattern_logic import (
     find_pivots, build_alternating_zigzag, detect_ascending_triangle,
     check_prior_uptrend, check_breakout,
 )
-from upstox_client import fetch_daily_candles, fetch_intraday_historical
+from upstox_client import fetch_daily_candles, fetch_intraday_historical_chunked
 from instrument_lookup import (
     load_instrument_master, find_instrument_key,
     load_complete_instrument_master, build_fno_and_index_watchlist,
@@ -41,7 +41,19 @@ st.caption(
 )
 
 # ---------------------------------------------------------------------
-# Sidebar — credentials and settings
+# Internal defaults (previously exposed as sidebar sliders — now fixed
+# values so the UI stays simple). Edit these constants directly in code
+# if you want to tune matching strictness.
+# ---------------------------------------------------------------------
+TOL_PCT = 1.5              # how close repeated resistance touches must be, as a %
+MIN_PAIRS = 3              # 4 matches the exact diagram; 3 is a looser/earlier variant, more likely to find hits
+PIVOT_LEFT = 2
+PIVOT_RIGHT = 2
+UPTREND_LOOKBACK = 10
+UPTREND_GREEN_PCT = 0.5
+
+# ---------------------------------------------------------------------
+# Sidebar — credentials + timeframe only
 # ---------------------------------------------------------------------
 with st.sidebar:
     st.header("Upstox Access")
@@ -53,17 +65,8 @@ with st.sidebar:
     st.caption("This token is used only for this session's requests and is not saved anywhere.")
 
     st.divider()
-    st.header("Screener Settings")
     timeframe = st.selectbox("Timeframe", ["daily", "60", "15"], index=0,
                               help="'daily' uses daily candles; '60'/'15' use minute candles.")
-    tol_pct = st.slider("Resistance tolerance (%)", 0.1, 3.0, 1.0, 0.1,
-                         help="How close repeated resistance touches must be to count as 'flat'.")
-    min_pairs = st.select_slider("Required touch pairs", options=[3, 4, 5], value=4,
-                                  help="4 matches the exact diagram; 3 is a looser/earlier variant.")
-    pivot_left = st.slider("Pivot left bars", 1, 5, 2)
-    pivot_right = st.slider("Pivot right bars", 1, 5, 2)
-    uptrend_lookback = st.slider("Prior-uptrend lookback (bars)", 3, 20, 10)
-    uptrend_green_pct = st.slider("Prior-uptrend green-candle %", 0.3, 1.0, 0.6, 0.05)
 
 # ---------------------------------------------------------------------
 # Watchlist input
@@ -177,27 +180,27 @@ if run:
                 df = fetch_daily_candles(access_token, instrument_key, from_date, to_date)
             else:
                 from_date = (date.today() - timedelta(days=60)).isoformat()
-                df = fetch_intraday_historical(access_token, instrument_key, timeframe, from_date, to_date)
+                df = fetch_intraday_historical_chunked(access_token, instrument_key, timeframe, from_date, to_date)
         except Exception as e:
             results.append({"symbol": symbol, "status": f"Error: {e}"})
             continue
 
-        if df.empty or len(df) < (2 * min_pairs + 5):
+        if df.empty or len(df) < (2 * MIN_PAIRS + 5):
             results.append({"symbol": symbol, "status": "Not enough candle history"})
             continue
 
         df = df.reset_index(drop=True)
-        pivots = find_pivots(df, left=pivot_left, right=pivot_right)
+        pivots = find_pivots(df, left=PIVOT_LEFT, right=PIVOT_RIGHT)
         zigzag = build_alternating_zigzag(pivots)
-        pattern = detect_ascending_triangle(zigzag, tol_pct=tol_pct, min_pairs=min_pairs)
+        pattern = detect_ascending_triangle(zigzag, tol_pct=TOL_PCT, min_pairs=MIN_PAIRS)
 
         if pattern is None:
             results.append({"symbol": symbol, "status": "No matching structure"})
             continue
 
         uptrend_ok = check_prior_uptrend(df, pattern["segment"][0][0],
-                                          lookback=uptrend_lookback,
-                                          green_pct_threshold=uptrend_green_pct)
+                                          lookback=UPTREND_LOOKBACK,
+                                          green_pct_threshold=UPTREND_GREEN_PCT)
         breakout = check_breakout(df, pattern)
 
         if breakout:
