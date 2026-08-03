@@ -104,6 +104,7 @@ def check_prior_uptrend(df, point1_idx, ma_period=20, min_rise_pct=5.0, lookback
     Returns True only if the full uptrend is confirmed, False if it's
     clearly not there, None if there isn't enough history to judge.
     """
+    point1_idx = int(point1_idx)
     needed = ma_period + lookback_extra
     if point1_idx < needed:
         return None
@@ -114,14 +115,15 @@ def check_prior_uptrend(df, point1_idx, ma_period=20, min_rise_pct=5.0, lookback
     if len(ma) <= ma_period or pd.isna(ma.iloc[-1]) or pd.isna(ma.iloc[-1 - ma_period]):
         return None
 
-    price_at_point1 = df.loc[point1_idx, "close"]
+    price_at_point1 = df["close"].iloc[point1_idx]
     ma_now = ma.iloc[-1]
     ma_earlier = ma.iloc[-1 - ma_period]
 
     above_ma = price_at_point1 > ma_now
     ma_rising = ma_now > ma_earlier
 
-    rally_window = df.iloc[max(0, point1_idx - lookback_extra):point1_idx + 1]
+    rally_start = max(0, point1_idx - lookback_extra)
+    rally_window = df.iloc[rally_start:point1_idx + 1]
     lowest_low = rally_window["low"].min()
     rise_pct = (price_at_point1 - lowest_low) / lowest_low * 100 if lowest_low > 0 else 0
     strong_rise = rise_pct >= min_rise_pct
