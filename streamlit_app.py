@@ -100,10 +100,27 @@ if load_fno_clicked:
     try:
         with st.spinner("Downloading Upstox's complete instrument master (large file, first time only)..."):
             df_complete = _cached_complete_instrument_master()
-        watchlist_dict = build_fno_and_index_watchlist(df_complete, progress_callback=_progress)
+        watchlist_dict, debug_info = build_fno_and_index_watchlist(
+            df_complete, progress_callback=_progress, debug=True
+        )
         progress_placeholder.empty()
         st.session_state.watchlist_text = "\n".join(f"{sym},{key}" for sym, key in watchlist_dict.items())
         st.success(f"Loaded {len(watchlist_dict)} symbols (F&O stocks + indices) into the watchlist below.")
+
+        with st.expander("🔧 Diagnostics (open this if the count above looks too low)"):
+            st.write(f"**Total instrument rows in file:** {debug_info['total_rows']:,}")
+            st.write(f"**Rows in NSE_FO segment:** {debug_info['nse_fo_rows']:,}")
+            st.write("**instrument_type values found within NSE_FO:**")
+            st.json(debug_info["instrument_type_counts_in_NSE_FO"])
+            st.write(f"**Rows matched as futures contracts:** {debug_info['fo_futures_rows_matched']:,}")
+            st.write(f"**Underlying-symbol extraction method used:** `{debug_info['method_used']}`")
+            st.write(f"**Underlying-symbol column used (if any):** `{debug_info['underlying_column_used']}`")
+            st.write(f"**F&O symbols found before resolving to equity keys:** {debug_info['symbol_count_found']}")
+            st.write(f"**Sample symbols found:** {debug_info['sample_symbols']}")
+            st.write(f"**Successfully resolved to a cash-equity instrument_key:** {debug_info['resolved_count']}")
+            st.write(f"**Could NOT be resolved:** {debug_info['unresolved_count']}")
+            if debug_info["unresolved_sample"]:
+                st.write(f"**Sample of unresolved symbols:** {debug_info['unresolved_sample']}")
     except Exception as e:
         st.error(f"Could not load F&O list: {e}")
 

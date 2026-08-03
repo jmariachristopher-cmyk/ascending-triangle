@@ -52,12 +52,20 @@ def load_complete_instrument_master() -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-def get_fno_underlying_symbols(df_complete: pd.DataFrame):
+def get_fno_underlying_symbols(df_complete: pd.DataFrame, debug: bool = False):
     """
     Filters the complete instrument master for NSE F&O futures contracts
     and returns the unique list of underlying stock symbols currently
     eligible for F&O trading — pulled live from Upstox, so it stays
     accurate as NSE adds/removes stocks from the segment over time.
+
+    Robust to Upstox's instrument_type naming (some files use a plain
+    "FUT", others use "FUTSTK"/"FUTIDX" — this matches ANY type containing
+    "FUT" rather than requiring an exact string, since guessing the exact
+    literal wrongly silently returns almost nothing).
+
+    If debug=True, returns (symbols, debug_info) where debug_info is a dict
+    with diagnostic details for troubleshooting instead of just the list.
     """
     df_complete.columns = [c.strip() for c in df_complete.columns]
 
@@ -66,30 +74,57 @@ def get_fno_underlying_symbols(df_complete: pd.DataFrame):
     if seg_col is None or type_col is None:
         raise RuntimeError(f"Could not find segment/instrument_type columns. Columns: {list(df_complete.columns)}")
 
-    fo_futures = df_complete[
-        (df_complete[seg_col].astype(str).str.upper() == "NSE_FO")
-        & (df_complete[type_col].astype(str).str.upper() == "FUT")
-    ]
+    nse_fo = df_complete[df_complete[seg_col].astype(str).str.upper() == "NSE_FO"]
+    instrument_type_counts = nse_fo[type_col].value_counts().to_dict()
 
-    # The underlying stock symbol field name has varied across Upstox file
-    # versions — check the likely candidates defensively.
+    fo_futures = nse_fo[nse_fo[type_col].astype(str).str.upper().str.contains("FUT", na=False)]
+
     underlying_col = next(
         (c for c in df_complete.columns if c.lower() in
-         ("underlying_symbol", "asset_symbol", "name", "underlying_key")),
+         ("underlying_symbol", "asset_symbol", "underlying_key", "name")),
         None
     )
-    if underlying_col is None:
-        raise RuntimeError(
-            f"Could not find an underlying-symbol column in the F&O rows. "
-            f"Columns available: {list(df_complete.columns)}"
-        )
 
-    symbols = sorted(fo_futures[underlying_col].dropna().astype(str).str.upper().unique().tolist())
-    # Drop the index futures (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY) since
-    # those aren't cash-market equities — indices are added separately via
-    # INDEX_INSTRUMENT_KEYS.
-    index_names = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
-    symbols = [s for s in symbols if s not in index_names]
+    symbols = []
+    method_used = None
+
+    if underlying_col is not None:
+        candidate_symbols = sorted(
+            fo_futures[underlying_col].dropna().astype(str).str.upper().unique().tolist()
+        )
+        # Sanity check: NSE currently has on the order of 150-250 F&O stocks.
+        # If this column gave us a wildly implausible count (e.g. near-zero,
+        # or thousands because it's actually a per-contract description
+        # field), don't trust it — fall back to parsing trading_symbol.
+        if 20 <= len(candidate_symbols) <= 400:
+            symbols = candidate_symbols
+            method_used = f"column '{underlying_col}'"
+
+    if not symbols:
+        # Fallback: derive the underlying from the leading alphabetic
+        # characters of trading_symbol (e.g. "RELIANCE25SEPFUT" -> "RELIANCE").
+        sym_col = next((c for c in df_complete.columns if c.lower() in ("trading_symbol", "tradingsymbol")), None)
+        if sym_col is not None:
+            extracted = fo_futures[sym_col].astype(str).str.upper().str.extract(r"^([A-Z&\-]+)")[0]
+            symbols = sorted(extracted.dropna().unique().tolist())
+            method_used = f"regex fallback on '{sym_col}'"
+
+    index_like = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT", "SENSEX", "BANKEX"}
+    symbols = [s for s in symbols if not any(idx in s for idx in index_like)]
+
+    if debug:
+        debug_info = {
+            "total_rows": len(df_complete),
+            "nse_fo_rows": len(nse_fo),
+            "instrument_type_counts_in_NSE_FO": instrument_type_counts,
+            "fo_futures_rows_matched": len(fo_futures),
+            "underlying_column_used": underlying_col,
+            "method_used": method_used,
+            "symbol_count_found": len(symbols),
+            "sample_symbols": symbols[:15],
+        }
+        return symbols, debug_info
+
     return symbols
 
 
@@ -123,15 +158,23 @@ def find_instrument_key(df: pd.DataFrame, symbol: str):
     return str(row[key_col]), row.to_dict()
 
 
-def build_fno_and_index_watchlist(df_complete: pd.DataFrame, progress_callback=None):
+def build_fno_and_index_watchlist(df_complete: pd.DataFrame, progress_callback=None, debug: bool = False):
     """
     Returns a dict {symbol: instrument_key} covering every current F&O
     stock's CASH EQUITY instrument_key, plus NIFTY 50 / BANK NIFTY / SENSEX.
     progress_callback(done, total, symbol) is called after each resolution
     if provided, so a UI can show progress.
+
+    If debug=True, returns (watchlist, debug_info) instead of just watchlist.
     """
-    fno_symbols = get_fno_underlying_symbols(df_complete)
+    if debug:
+        fno_symbols, debug_info = get_fno_underlying_symbols(df_complete, debug=True)
+    else:
+        fno_symbols = get_fno_underlying_symbols(df_complete)
+        debug_info = None
+
     watchlist = dict(INDEX_INSTRUMENT_KEYS)
+    unresolved = []
 
     total = len(fno_symbols)
     for i, symbol in enumerate(fno_symbols):
@@ -139,8 +182,14 @@ def build_fno_and_index_watchlist(df_complete: pd.DataFrame, progress_callback=N
             key, _ = find_instrument_key(df_complete, symbol)
             watchlist[symbol] = key
         except Exception:
-            pass  # skip symbols we can't resolve to a cash-equity instrument_key
+            unresolved.append(symbol)
         if progress_callback:
             progress_callback(i + 1, total, symbol)
+
+    if debug:
+        debug_info["resolved_count"] = len(watchlist) - len(INDEX_INSTRUMENT_KEYS)
+        debug_info["unresolved_count"] = len(unresolved)
+        debug_info["unresolved_sample"] = unresolved[:15]
+        return watchlist, debug_info
 
     return watchlist
