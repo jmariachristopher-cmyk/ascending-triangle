@@ -84,14 +84,49 @@ def detect_ascending_triangle(zigzag, tol_pct: float = 0.6, min_pairs: int = 4):
     }
 
 
-def check_prior_uptrend(df, point1_idx, lookback=10, green_pct_threshold=0.6):
-    """Rule 1: point 1 should be preceded by a clear preceding up-move."""
-    start = max(0, point1_idx - lookback)
-    if start >= point1_idx:
-        return None  # not enough data to judge
-    window = df.iloc[start:point1_idx]
-    green_pct = (window["close"] > window["open"]).mean()
-    return green_pct >= green_pct_threshold
+def check_prior_uptrend(df, point1_idx, ma_period=20, min_rise_pct=5.0, lookback_extra=30):
+    """
+    Rule 1, done properly: point 1 must be preceded by a REAL prior uptrend,
+    not just a coin-flip majority of green candles (which can pass even on
+    a choppy or declining chart — the earlier version of this check was too
+    weak and let false positives like a small wedge forming after a decline
+    slip through).
+
+    Confirms ALL of:
+      1. Price at point 1 is above its ma_period-bar moving average
+      2. That moving average is itself rising (higher than ma_period bars
+         earlier) — confirms sustained direction, not just a brief spike
+      3. Price has risen at least min_rise_pct% from its lowest point in
+         the lookback_extra bars before point 1 — confirms an actual
+         meaningful prior rally happened, matching the steep run-up shown
+         in the reference diagrams
+
+    Returns True only if the full uptrend is confirmed, False if it's
+    clearly not there, None if there isn't enough history to judge.
+    """
+    needed = ma_period + lookback_extra
+    if point1_idx < needed:
+        return None
+
+    window = df.iloc[:point1_idx + 1]
+    ma = window["close"].rolling(ma_period).mean()
+
+    if len(ma) <= ma_period or pd.isna(ma.iloc[-1]) or pd.isna(ma.iloc[-1 - ma_period]):
+        return None
+
+    price_at_point1 = df.loc[point1_idx, "close"]
+    ma_now = ma.iloc[-1]
+    ma_earlier = ma.iloc[-1 - ma_period]
+
+    above_ma = price_at_point1 > ma_now
+    ma_rising = ma_now > ma_earlier
+
+    rally_window = df.iloc[max(0, point1_idx - lookback_extra):point1_idx + 1]
+    lowest_low = rally_window["low"].min()
+    rise_pct = (price_at_point1 - lowest_low) / lowest_low * 100 if lowest_low > 0 else 0
+    strong_rise = rise_pct >= min_rise_pct
+
+    return bool(above_ma and ma_rising and strong_rise)
 
 
 def check_breakout(df, pattern, buffer_pct: float = 0.05):

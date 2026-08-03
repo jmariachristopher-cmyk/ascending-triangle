@@ -35,8 +35,10 @@ from instrument_lookup import (
 st.set_page_config(page_title="Ascending Triangle Screener", layout="wide")
 st.title("📐 Ascending Triangle Pattern Screener")
 st.caption(
-    "Flags stocks matching a flat-resistance + rising-lows breakout structure "
-    "(4 resistance touches, each low higher than the last, entry on breakout). "
+    "Flags stocks matching a flat-resistance + rising-lows breakout structure, "
+    "REQUIRED to be preceded by a real, confirmed prior uptrend (moving-average "
+    "based, not just a majority of green candles) — a triangle shape forming after "
+    "a decline or sideways chop is rejected, not just flagged. "
     "This is a structural pattern filter, not a prediction of what happens next."
 )
 
@@ -49,8 +51,9 @@ TOL_PCT = 1.5              # how close repeated resistance touches must be, as a
 MIN_PAIRS = 3              # 4 matches the exact diagram; 3 is a looser/earlier variant, more likely to find hits
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
-UPTREND_LOOKBACK = 10
-UPTREND_GREEN_PCT = 0.5
+UPTREND_MA_PERIOD = 20         # moving-average length used to confirm the prior trend is real and sustained
+UPTREND_MIN_RISE_PCT = 5.0     # price must have risen at least this % before point 1 to count as a genuine rally
+UPTREND_LOOKBACK_EXTRA = 30    # how many bars back to look for that prior rally's starting low
 
 # ---------------------------------------------------------------------
 # Sidebar — credentials + timeframe only
@@ -199,8 +202,15 @@ if run:
             continue
 
         uptrend_ok = check_prior_uptrend(df, pattern["segment"][0][0],
-                                          lookback=UPTREND_LOOKBACK,
-                                          green_pct_threshold=UPTREND_GREEN_PCT)
+                                          ma_period=UPTREND_MA_PERIOD,
+                                          min_rise_pct=UPTREND_MIN_RISE_PCT,
+                                          lookback_extra=UPTREND_LOOKBACK_EXTRA)
+
+        if uptrend_ok is not True:
+            reason = "not enough history to confirm" if uptrend_ok is None else "no real prior uptrend"
+            results.append({"symbol": symbol, "status": f"Pattern shape found but REJECTED — {reason}"})
+            continue
+
         breakout = check_breakout(df, pattern)
 
         if breakout:
@@ -213,7 +223,6 @@ if run:
             "resistance": round(pattern["resistance"], 2),
             "point1_high": round(pattern["point1_high"], 2),
             "point2_low": round(pattern["point2_low"], 2),
-            "prior_uptrend_ok": uptrend_ok,
             "status": status,
             "_df": df, "_pattern": pattern,
         })
