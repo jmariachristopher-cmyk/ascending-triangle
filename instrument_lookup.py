@@ -128,6 +128,40 @@ def get_fno_underlying_symbols(df_complete: pd.DataFrame, debug: bool = False):
     return symbols
 
 
+def find_instrument_key_by_company_name(df: pd.DataFrame, company_name: str):
+    """
+    F&O rows' 'name' field holds the full legal company name (e.g.
+    "ADANI ENTERPRISES LIMITED"), not the trading_symbol ticker. To resolve
+    an F&O stock to its cash-equity instrument_key, match that same 'name'
+    field against the NSE_EQ segment's 'name' field (both come from the
+    same underlying company reference, so they match exactly), then read
+    off the real ticker (trading_symbol) and instrument_key from there.
+    """
+    df.columns = [c.strip() for c in df.columns]
+    name_col = next((c for c in df.columns if c.lower() == "name"), None)
+    seg_col = next((c for c in df.columns if c.lower() == "segment"), None)
+    type_col = next((c for c in df.columns if c.lower() == "instrument_type"), None)
+    key_col = next((c for c in df.columns if c.lower() == "instrument_key"), None)
+    sym_col = next((c for c in df.columns if c.lower() in ("trading_symbol", "tradingsymbol")), None)
+
+    if not all([name_col, seg_col, type_col, key_col, sym_col]):
+        raise RuntimeError(f"Missing expected columns. Columns found: {list(df.columns)}")
+
+    candidates = df[
+        (df[seg_col].astype(str).str.upper() == "NSE_EQ")
+        & (df[type_col].astype(str).str.upper() == "EQ")
+    ]
+
+    target = company_name.upper().strip()
+    matches = candidates[candidates[name_col].astype(str).str.upper().str.strip() == target]
+
+    if matches.empty:
+        raise ValueError(f"No cash-equity match found for company name '{company_name}'.")
+
+    row = matches.iloc[0]
+    return str(row[key_col]), str(row[sym_col])
+
+
 def find_instrument_key(df: pd.DataFrame, symbol: str):
     df.columns = [c.strip() for c in df.columns]
 
@@ -160,31 +194,38 @@ def find_instrument_key(df: pd.DataFrame, symbol: str):
 
 def build_fno_and_index_watchlist(df_complete: pd.DataFrame, progress_callback=None, debug: bool = False):
     """
-    Returns a dict {symbol: instrument_key} covering every current F&O
-    stock's CASH EQUITY instrument_key, plus NIFTY 50 / BANK NIFTY / SENSEX.
-    progress_callback(done, total, symbol) is called after each resolution
-    if provided, so a UI can show progress.
+    Returns a dict {trading_symbol: instrument_key} covering every current
+    F&O stock's CASH EQUITY instrument_key, plus NIFTY 50 / BANK NIFTY /
+    SENSEX. progress_callback(done, total, name) is called after each
+    resolution if provided, so a UI can show progress.
+
+    Uses the CORRECT resolver depending on how the underlying values were
+    extracted: if extracted from a 'name'-type column, those are full
+    company names and must be matched via find_instrument_key_by_company_name;
+    if extracted via the trading_symbol regex fallback, those are already
+    plain tickers and must be matched via find_instrument_key instead.
 
     If debug=True, returns (watchlist, debug_info) instead of just watchlist.
     """
-    if debug:
-        fno_symbols, debug_info = get_fno_underlying_symbols(df_complete, debug=True)
-    else:
-        fno_symbols = get_fno_underlying_symbols(df_complete)
-        debug_info = None
+    fno_values, debug_info = get_fno_underlying_symbols(df_complete, debug=True)
+    is_ticker_fallback = "regex fallback" in str(debug_info.get("method_used", ""))
 
     watchlist = dict(INDEX_INSTRUMENT_KEYS)
     unresolved = []
 
-    total = len(fno_symbols)
-    for i, symbol in enumerate(fno_symbols):
+    total = len(fno_values)
+    for i, value in enumerate(fno_values):
         try:
-            key, _ = find_instrument_key(df_complete, symbol)
-            watchlist[symbol] = key
+            if is_ticker_fallback:
+                key, _ = find_instrument_key(df_complete, value)
+                watchlist[value.upper()] = key
+            else:
+                key, ticker = find_instrument_key_by_company_name(df_complete, value)
+                watchlist[ticker] = key
         except Exception:
-            unresolved.append(symbol)
+            unresolved.append(value)
         if progress_callback:
-            progress_callback(i + 1, total, symbol)
+            progress_callback(i + 1, total, value)
 
     if debug:
         debug_info["resolved_count"] = len(watchlist) - len(INDEX_INSTRUMENT_KEYS)
