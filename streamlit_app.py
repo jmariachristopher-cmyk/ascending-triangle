@@ -192,26 +192,36 @@ if run:
             results.append({"symbol": symbol, "status": "Not enough candle history"})
             continue
 
-        df = df.reset_index(drop=True)
-        pivots = find_pivots(df, left=PIVOT_LEFT, right=PIVOT_RIGHT)
-        zigzag = build_alternating_zigzag(pivots)
-        pattern = detect_ascending_triangle(zigzag, tol_pct=TOL_PCT, min_pairs=MIN_PAIRS)
+        try:
+            df = df.reset_index(drop=True)
+            pivots = find_pivots(df, left=PIVOT_LEFT, right=PIVOT_RIGHT)
+            zigzag = build_alternating_zigzag(pivots)
+            pattern = detect_ascending_triangle(zigzag, tol_pct=TOL_PCT, min_pairs=MIN_PAIRS)
 
-        if pattern is None:
-            results.append({"symbol": symbol, "status": "No matching structure"})
+            if pattern is None:
+                results.append({"symbol": symbol, "status": "No matching structure"})
+                continue
+
+            uptrend_ok = check_prior_uptrend(df, pattern["segment"][0][0],
+                                              ma_period=UPTREND_MA_PERIOD,
+                                              min_rise_pct=UPTREND_MIN_RISE_PCT,
+                                              lookback_extra=UPTREND_LOOKBACK_EXTRA)
+
+            if uptrend_ok is not True:
+                reason = "not enough history to confirm" if uptrend_ok is None else "no real prior uptrend"
+                results.append({"symbol": symbol, "status": f"Pattern shape found but REJECTED — {reason}"})
+                continue
+
+            breakout = check_breakout(df, pattern)
+        except Exception as e:
+            import traceback
+            results.append({
+                "symbol": symbol,
+                "status": f"⚠️ Internal error while analyzing this stock: {type(e).__name__}: {e}",
+            })
+            with st.expander(f"Full traceback for {symbol} (for debugging)", expanded=False):
+                st.code(traceback.format_exc())
             continue
-
-        uptrend_ok = check_prior_uptrend(df, pattern["segment"][0][0],
-                                          ma_period=UPTREND_MA_PERIOD,
-                                          min_rise_pct=UPTREND_MIN_RISE_PCT,
-                                          lookback_extra=UPTREND_LOOKBACK_EXTRA)
-
-        if uptrend_ok is not True:
-            reason = "not enough history to confirm" if uptrend_ok is None else "no real prior uptrend"
-            results.append({"symbol": symbol, "status": f"Pattern shape found but REJECTED — {reason}"})
-            continue
-
-        breakout = check_breakout(df, pattern)
 
         if breakout:
             status = f"🚀 BREAKOUT — entry {breakout['entry_price']:.2f}, target {breakout['target_price']:.2f}"
